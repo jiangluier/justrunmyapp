@@ -2,7 +2,9 @@ name: JustRunMy-renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '12 */11 * * *' # 每天 7点(UTC 23点) 运行
+    # 北京时间每天 07:00 = UTC 23:00
+    # GitHub Actions 的 cron 只认 UTC;高峰期可能延迟数分钟到数十分钟
+    - cron: '0 23 * * *'
 
 jobs:
   renew:
@@ -12,14 +14,14 @@ jobs:
       contents: write
       actions: write
     steps:
-      - name: 📥 下载代码
+      - name:  下载代码
         uses: actions/checkout@v6
-      - name: 🐍 设置 Python
+      - name:  设置 Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-          
-      - name: 🛠️ 安装系统依赖
+
+      - name: ️ 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -28,8 +30,8 @@ jobs:
             xdotool \
             scrot \
             fonts-noto-cjk
-            
-      - name: 🐍 安装 Python 依赖
+
+      - name:  安装 Python 依赖
         run: |
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
@@ -40,7 +42,7 @@ jobs:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-          
+
       - name: 🚀 运行续期脚本
         env:
           JUSTRUNMY_EMAIL: ${{ secrets.JUSTRUNMY_EMAIL }}
@@ -50,34 +52,20 @@ jobs:
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             python3 app.py
-          
-      # - name: 🧹 清理旧的工作流运行记录
-      #   if: always()
-      #   env:
-      #     GH_TOKEN: ${{ github.token }}
-      #   run: |
-      #     runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
-      #     count=0
-      #     for run_id in $runs; do
-      #       count=$((count + 1))
-      #       if [ $count -gt 1 ]; then
-      #         echo "删除运行记录: $run_id"
-      #         gh run delete $run_id || true
-      #       fi
-      #     done
+
       # ---------------------------------------------------------
-      # 7. Keepalive commit
+      # Keep-alive:更新时间戳文件,防止仓库 60 天无活动导致
+      # schedule 被自动禁用。只在有实际变更时才提交。
       # ---------------------------------------------------------
-      - name: Create keep-alive commit
+      - name: Keep-alive commit
         run: |
-          echo "Last backup: $(date -u '+%Y-%m-%d %H:%M:%S UTC') | ID: $(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)" > keepalive.md
+          date -u '+%Y-%m-%d' > keepalive.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add keepalive.md || true
-
-      - name: Commit & Push if changed
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "keepalive"
-          file_pattern: keepalive.md
-          push_options: '--force'
+          git add keepalive.md
+          if git diff --staged --quiet; then
+            echo "无变更,跳过提交"
+          else
+            git commit -m "keepalive [skip ci]"
+            git push
+          fi
