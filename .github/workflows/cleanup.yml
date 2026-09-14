@@ -1,0 +1,107 @@
+name: Cleanup old workflow runs
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '保留最近多少天的运行记录'
+        required: false
+        default: '7'
+      max_delete:
+        description: '本次最多删除多少条(防止打爆 rate limit)'
+        required: false
+        default: '300'
+      dry_run:
+        description: '只列出要删的,不实际删除'
+        required: false
+        default: 'false'
+  schedule:
+    # 每周日 UTC 03:00 = 北京时间 11:00
+    - cron: '0 3 * * 0'
+
+permissions:
+  actions: write   # 删除运行记录必需
+  contents: read
+
+concurrency:
+  group: cleanup-runs
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 🧹 清理旧运行记录
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DAYS: ${{ github.event.inputs.days || '7' }}
+          MAX_DELETE: ${{ github.event.inputs.max_delete || '300' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          # 留空 = 清理本仓库所有工作流;填文件名(如 JustRunMy-renew.yml)可只清一个
+          TARGET_WORKFLOW: ''
+        run: |
+          set -euo pipefail
+
+          CUTOFF=$(date -u -d "${DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)
+          echo "仓库         : $REPO"
+          echo "保留策略     : 最近 ${DAYS} 天"
+          echo "删除截止     : $CUTOFF (UTC)"
+          echo "单次上限     : ${MAX_DELETE} 条"
+          echo "目标工作流   : ${TARGET_WORKFLOW:-<全部>}"
+          [ "$DRY_RUN" = "true" ] && echo "模式         : DRY RUN(不会真正删除)"
+
+          ARGS=(-R "$REPO" -L 1000
+                --json databaseId,createdAt,status,workflowName)
+
+          if [ -n "${TARGET_WORKFLOW:-}" ]; then
+            ARGS+=(-w "$TARGET_WORKFLOW")
+          fi
+
+          # 只取:已完成 + 创建时间早于 cutoff
+          IDS=$(gh run list "${ARGS[@]}" --jq \
+            "[.[] | select(.status == \"completed\")
+                   | select(.createdAt < \"$CUTOFF\")
+                   | .databaseId] | .[]")
+
+          if [ -z "$IDS" ]; then
+            echo "✅ 没有符合条件的运行记录,无需清理"
+            exit 0
+          fi
+
+          TOTAL=$(echo "$IDS" | wc -l | tr -d ' ')
+          echo "符合条件的运行记录:$TOTAL 条"
+
+          count=0
+          while read -r id; do
+            [ -z "$id" ] && continue
+
+            if [ "$count" -ge "$MAX_DELETE" ]; then
+              echo "⏸  已达到单次上限 ${MAX_DELETE} 条,剩余留到下次"
+              break
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "  [dry-run] 将删除 run $id"
+              count=$((count + 1))
+              continue
+            fi
+
+            if gh run delete "$id" -R "$REPO"; then
+              echo "  ✅ 已删除 run $id"
+              count=$((count + 1))
+            else
+              echo "  ⚠️  删除 run $id 失败(可能已不在或正在运行),跳过"
+            fi
+
+            sleep 0.2   # 轻微限速,避免次级限流
+          done <<< "$IDS"
+
+          echo "----------------------------------------"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "🔍 DRY RUN 结束,实际会删除 $count 条"
+          else
+            echo "🎉 清理完成,共删除 $count 条"
+          fi
